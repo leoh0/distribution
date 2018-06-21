@@ -566,6 +566,57 @@ func (d *driver) Writer(ctx context.Context, path string, append bool) (storaged
 		}
 		return d.newWriter(key, *multi.UploadId, resp.Parts), nil
 	}
+
+	// retry 5 times
+	for i := 0; i < 5; i++ {
+		resp_retry, err_retry := d.S3.CreateMultipartUpload(&s3.CreateMultipartUploadInput{
+			Bucket:               aws.String(d.Bucket),
+			Key:                  aws.String(key),
+			ContentType:          d.getContentType(),
+			ACL:                  d.getACL(),
+			ServerSideEncryption: d.getEncryptionMode(),
+			SSEKMSKeyId:          d.getSSEKMSKeyID(),
+			StorageClass:         d.getStorageClass(),
+		})
+
+		dcontext.GetLogger(ctx).Infof("recreate: %v, %v, %v, %v", i, d.Bucket, key, resp_retry)
+
+		if err_retry != nil {
+			return nil, err_retry
+		}
+
+		d.newWriter(key, *resp_retry.UploadId, nil)
+
+		resp, err = d.S3.ListMultipartUploads(&s3.ListMultipartUploadsInput{
+			Bucket: aws.String(d.Bucket),
+			Prefix: aws.String(key),
+		})
+		if err != nil {
+			return nil, parseError(path, err)
+		}
+
+		dcontext.GetLogger(ctx).Infof("recheck upload: %v, %v, %v, %v", i, d.Bucket, key, resp)
+
+		for _, multi := range resp.Uploads {
+			if key != *multi.Key {
+				continue
+			}
+			resp, err := d.S3.ListParts(&s3.ListPartsInput{
+				Bucket:   aws.String(d.Bucket),
+				Key:      aws.String(key),
+				UploadId: multi.UploadId,
+			})
+			if err != nil {
+				return nil, parseError(path, err)
+			}
+			var multiSize int64
+			for _, part := range resp.Parts {
+				multiSize += *part.Size
+			}
+			return d.newWriter(key, *multi.UploadId, resp.Parts), nil
+		}
+	}
+
 	return nil, storagedriver.PathNotFoundError{Path: path}
 }
 
